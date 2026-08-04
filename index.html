@@ -329,6 +329,7 @@ function applyRemote(r){
   DB.ops=r.ops||[];DB.fixes=r.fixes||[];DB.opening=r.opening||{};
   DB.decouvert=(r.decouvert==null?800:r.decouvert);DB.enseignes=r.enseignes||{};
   DB.customCats=r.customCats||[];DB.nextId=r.nextId||1;
+  DB.previ=r.previ||{};
   (DB.ops||[]).forEach(o=>{if(o.libelle)o.libelle=(''+o.libelle).toUpperCase();});
   saveLocal();
   if(typeof render==='function' && !document.getElementById('app').classList.contains('hidden'))render();
@@ -338,7 +339,7 @@ function cloudPush(){
   if(!fbDoc||!fbAuth||!fbAuth.currentUser)return;
   clearTimeout(cloudPush._t);
   cloudPush._t=setTimeout(()=>{
-    const payload=JSON.stringify({ops:DB.ops,fixes:DB.fixes,opening:DB.opening,decouvert:DB.decouvert,enseignes:DB.enseignes,customCats:DB.customCats,nextId:DB.nextId});
+    const payload=JSON.stringify({ops:DB.ops,fixes:DB.fixes,opening:DB.opening,decouvert:DB.decouvert,enseignes:DB.enseignes,customCats:DB.customCats,nextId:DB.nextId,previ:DB.previ});
     fbDoc.set({payload,updated:Date.now()}).catch(e=>console.error('push',e));
   },600);
 }
@@ -363,6 +364,7 @@ function load(){
   if(r.decouvert==null)r.decouvert=800;
   if(!r.enseignes)r.enseignes={};
   if(!r.customCats)r.customCats=[];
+  if(!r.previ)r.previ={}; // prévisionnel : simulation isolée, par mois — jamais compté dans le solde réel
   (r.ops||[]).forEach(o=>{if(o.libelle)o.libelle=(''+o.libelle).toUpperCase();});
   (r.fixes||[]).forEach(f=>{if(f.libelle)f.libelle=(''+f.libelle).toUpperCase();});
   (r.ops||[]).forEach(o=>{if(o.libelle&&o.cat&&!r.enseignes[o.libelle])r.enseignes[o.libelle]=o.cat;});
@@ -608,7 +610,8 @@ function renderMarge(proj){
 }
 function renderTabs(){
   const nbAttente=DB.ops.filter(o=>o.mois===curYM&&o.date>todayISO()).length;
-  const defs=[['tout','Tout',0],['attente','En attente',nbAttente],['fixes','Fixes',0],['avenir','À venir',0],['stats','Stats',0]];
+  const nbChq=chequesEnAttente().length;
+  const defs=[['tout','Tout',0],['attente','En attente',nbAttente],['cheques','Chèques',nbChq],['fixes','Fixes',0],['avenir','À venir',0],['previ','Prévi',0],['stats','Stats',0]];
   const t=document.getElementById('tabs');t.innerHTML='';
   defs.forEach(([k,lbl,b])=>{
     const el=document.createElement('button');el.className='tab'+(curTab===k?' on':'');
@@ -655,6 +658,8 @@ function renderContent(){
   if(curTab==='attente')return renderAttente(c);
   if(curTab==='fixes')return renderFixes(c);
   if(curTab==='avenir')return renderAvenir(c);
+  if(curTab==='cheques')return renderCheques(c);
+  if(curTab==='previ')return renderPrevi(c);
   if(curTab==='stats')return renderStats(c);
 }
 // Comparateur de l'onglet « Tout ».
@@ -762,6 +767,181 @@ function renderAvenir(c){
   c.innerHTML=h;
 }
 function nextMonthFirstDay(){return ymAdd(ym(new Date()),1)+'-01';}
+
+/* ============================================================
+   CHÈQUES EN ATTENTE — tous mois confondus, avec recherche
+   Un chèque sort de la liste dès qu'il est encaissé OU que sa date est passée.
+   ============================================================ */
+let chqQuery='';
+function chequesEnAttente(){
+  const t=todayISO();
+  return DB.ops.filter(o=>o.marker==='cheque' && !o.chequeEncaisse && (o.date||'')>=t);
+}
+// Recherche : intitulé, montant approché (39 trouve 39,99) ou fourchette (30-50)
+function chqMatch(o,q){
+  const s=(q||'').trim().toLowerCase();
+  if(!s)return true;
+  const lib=(o.libelle||'').toLowerCase();
+  const m=+o.montant||0;
+  const range=s.match(/^(\d+[.,]?\d*)\s*(?:-|à|a|\.\.)\s*(\d+[.,]?\d*)$/);
+  if(range){
+    const lo=parseFloat(range[1].replace(',','.')),hi=parseFloat(range[2].replace(',','.'));
+    return m>=Math.min(lo,hi)&&m<=Math.max(lo,hi);
+  }
+  const num=s.replace(',','.');
+  if(/^\d+(\.\d+)?$/.test(num)){
+    const v=parseFloat(num);
+    if(Math.abs(m-v)<1)return true;
+    if(Math.floor(m)===Math.floor(v))return true;
+    if((''+m).startsWith(num))return true;
+    return false;
+  }
+  return lib.includes(s);
+}
+function renderCheques(c){
+  const attente=chequesEnAttente();
+  const list=attente.filter(o=>chqMatch(o,chqQuery)).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const tot=attente.reduce((s,o)=>s+(o.sens==='in'?o.montant:-o.montant),0);
+  let h=`<div class="sec">
+    <div class="note">Chèques en attente, tous mois confondus. Un chèque disparaît d'ici dès qu'il est encaissé ou que sa date est passée. La loupe accepte un intitulé (carrefour), un montant approximatif (39 trouve 39,99) ou une fourchette (30-50).</div>`;
+  h+=`<div class="sumcards" style="margin-top:12px">
+    <div class="sumc chq"><div class="l">En attente (${attente.length})</div><div class="v">${eur(tot)}</div></div>
+  </div>`;
+  h+=`<div style="display:flex;align-items:center;gap:8px;padding:0 12px;border:.5px solid var(--line2);border-radius:var(--r2);background:var(--field);margin-bottom:10px">
+      <span style="color:var(--ink3);font-size:16px">⌕</span>
+      <input id="chqQ" value="${escapeHtml(chqQuery)}" placeholder="Chercher : carrefour, 39, 30-50…" oninput="chqSearch(this.value)" style="flex:1;border:none;background:transparent;color:var(--ink);padding:11px 0;outline:none">
+      ${chqQuery?`<button onclick="chqSearch('')" style="color:var(--ink3);font-size:16px">✕</button>`:''}
+    </div>`;
+  if(list.length){
+    const groups={};list.forEach(o=>{(groups[o.mois]=groups[o.mois]||[]).push(o);});
+    Object.keys(groups).sort().forEach(m=>{
+      const st=groups[m].reduce((s,o)=>s+(o.sens==='in'?o.montant:-o.montant),0);
+      h+=`<div class="sec-h" style="margin-top:14px"><span class="t">${ymLabel(m)}</span><span class="x" style="color:var(--chq);font-weight:700">${eur(st)}</span></div>`;
+      h+=`<div class="list">`+groups[m].map(o=>`<div class="row">
+          <div class="mid" onclick="openOp(null,${o.id})">
+            <div class="nm">${escapeHtml((o.libelle||'(sans libellé)').toUpperCase())}</div>
+            <div class="meta">${dayLabel(o.date)} <span class="tag chq">en attente</span></div>
+          </div>
+          <div class="amt ${o.sens==='in'?'in':'out'}">${eurShort(o.sens==='in'?o.montant:-o.montant)}</div>
+          <button onclick="event.stopPropagation();encaisser(${o.id})" style="flex:0 0 auto;margin-left:8px;font-size:12px;font-weight:600;color:var(--in);background:var(--in-bg);padding:8px 10px;border-radius:8px">Encaissé</button>
+        </div>`).join('')+`</div>`;
+    });
+  }else{
+    h+=`<div class="list"><div class="empty">${chqQuery?'Aucun chèque ne correspond.':'Aucun chèque en attente. 👍'}</div></div>`;
+  }
+  h+=`</div>`;
+  c.innerHTML=h;
+}
+function chqSearch(v){
+  chqQuery=v;
+  renderContent();
+  const i=document.getElementById('chqQ');
+  if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}
+}
+
+/* ============================================================
+   PRÉVISIONNEL — simulation isolée (jamais comptée dans le solde réel)
+   ============================================================ */
+let previSens='out'; // sens de la prochaine ligne à ajouter
+function getPrevi(){
+  if(!DB.previ)DB.previ={};
+  if(!DB.previ[curYM])DB.previ[curYM]={base:null,lines:[]};
+  return DB.previ[curYM];
+}
+function previBaseVal(){
+  const p=getPrevi();
+  return (typeof p.base==='number')?p.base:projectedEnd(curYM); // auto = projeté fin de mois
+}
+function previSums(){
+  let dep=0,rent=0;
+  getPrevi().lines.forEach(l=>{const m=+l.montant||0;if(l.sens==='in')rent+=m;else dep+=m;});
+  return {dep,rent,net:rent-dep};
+}
+function renderPrevi(c){
+  const p=getPrevi();
+  const base=previBaseVal();
+  const s=previSums();
+  const res=Math.round((base+s.net)*100)/100;
+  const dec=(DB.decouvert==null?800:DB.decouvert);
+  const marge=Math.round((dec+res)*100)/100;
+  const auto=(typeof p.base!=='number');
+  let h=`<div class="sec">
+    <div class="note">Bac à sable : simule des dépenses ou rentrées de fin de mois. Rien ici n'est enregistré dans tes opérations ni compté dans ton solde réel — c'est juste une simulation, gardée par mois.</div>`;
+  // Montant de départ
+  h+=`<div class="fld" style="margin-top:12px">
+    <label>Montant de départ ${auto?'· projeté fin de mois (auto)':'· personnalisé'}</label>
+    <div style="display:flex;gap:8px;align-items:stretch">
+      <input id="previBase" type="number" inputmode="decimal" step="0.01" value="${base}" onchange="setPreviBase(this.value)" style="flex:1;padding:11px 12px;border:.5px solid var(--line2);border-radius:var(--r2);background:var(--field);color:var(--ink);font-weight:600">
+      ${auto?'':`<button onclick="resetPreviBase()" style="flex:0 0 auto;padding:0 12px;border-radius:9px;border:.5px solid var(--line2);background:var(--field);color:var(--ink2);font-size:13px">↻ auto</button>`}
+    </div>
+  </div>`;
+  // Lignes simulées
+  if(p.lines.length){
+    h+=`<div class="list">`+p.lines.map(l=>{
+      const isIn=l.sens==='in';
+      return `<div class="row">
+        <button onclick="togglePreviLineSens(${l.id})" title="Dépense / Rentrée" style="flex:0 0 auto;width:34px;height:34px;border-radius:8px;border:1px solid ${isIn?'var(--in)':'var(--out)'};background:${isIn?'var(--in-bg)':'var(--out-bg)'};color:${isIn?'var(--in)':'var(--out)'};font-size:20px;font-weight:700;line-height:1">${isIn?'＋':'－'}</button>
+        <div class="mid"><div class="nm">${escapeHtml((l.lib||'(sans nom)').toUpperCase())}</div></div>
+        <input type="number" inputmode="decimal" step="0.01" value="${l.montant}" onchange="setPreviLineAmt(${l.id},this.value)" style="width:88px;text-align:right;padding:8px;border:.5px solid var(--line2);border-radius:8px;background:var(--field);color:${isIn?'var(--in)':'var(--out)'};font-weight:600">
+        <button onclick="delPreviLine(${l.id})" aria-label="Supprimer" style="flex:0 0 auto;margin-left:8px;width:30px;height:30px;border-radius:8px;border:.5px solid var(--line2);background:var(--field);color:var(--ink3);font-size:15px">✕</button>
+      </div>`;
+    }).join('')+`</div>`;
+  }
+  // Ajout d'une ligne
+  const inNew=previSens==='in';
+  h+=`<div class="rf-line" style="margin-top:10px">
+    <button onclick="togglePreviSens()" id="previSensBtn" title="Dépense / Rentrée" style="flex:0 0 auto;width:54px;border-radius:11px;border:1px solid ${inNew?'var(--in)':'var(--out)'};background:${inNew?'var(--in-bg)':'var(--out-bg)'};color:${inNew?'var(--in)':'var(--out)'};font-size:24px;font-weight:700">${inNew?'＋':'－'}</button>
+    <input class="rf-lib" id="previLib" placeholder="Poste (ex. COURSES)" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('previMont').focus();}">
+    <input class="rf-mont" id="previMont" type="number" inputmode="decimal" step="0.01" placeholder="0,00" onkeydown="if(event.key==='Enter'){event.preventDefault();addPreviLine();}">
+    <button class="rf-add" style="background:var(--accent)" onclick="addPreviLine()">＋</button>
+  </div>`;
+  // Récap
+  h+=`<div class="sumcards" style="margin-top:14px">
+    <div class="sumc" style="background:var(--in-bg)"><div class="l" style="color:var(--in)">Rentrées simulées</div><div class="v" style="color:var(--in)">${eur(s.rent)}</div></div>
+    <div class="sumc" style="background:var(--out-bg)"><div class="l" style="color:var(--out)">Dépenses simulées</div><div class="v" style="color:var(--out)">${eur(-s.dep)}</div></div>
+  </div>`;
+  h+=`<div class="marge ${res<0?'bad':(marge<60?'warn':'ok')}" style="margin-top:10px">
+      <span class="ml">Solde simulé fin de mois</span><span class="mv">${eur(res)}</span></div>`;
+  h+=`</div>`;
+  c.innerHTML=h;
+}
+function togglePreviSens(){
+  previSens=(previSens==='in')?'out':'in';
+  const inNew=previSens==='in';
+  const b=document.getElementById('previSensBtn');
+  const mt=document.getElementById('previMont');
+  if(b){b.textContent=inNew?'＋':'－';b.style.border='1px solid '+(inNew?'var(--in)':'var(--out)');b.style.background=inNew?'var(--in-bg)':'var(--out-bg)';b.style.color=inNew?'var(--in)':'var(--out)';}
+  if(mt)mt.style.color=inNew?'var(--in)':'var(--out)';
+}
+function addPreviLine(){
+  const lib=(document.getElementById('previLib').value||'').trim().toUpperCase();
+  const n=parseFloat((document.getElementById('previMont').value||'').replace(',','.'));
+  if(isNaN(n)||n<0){toast('Montant invalide');return;}
+  getPrevi().lines.push({id:uid(),lib,montant:Math.round(n*100)/100,sens:previSens});
+  save();renderContent();
+  const li=document.getElementById('previLib');if(li)li.focus(); // enchaîner les saisies
+}
+function setPreviLineAmt(id,v){
+  const n=parseFloat((''+v).replace(',','.'));
+  const l=getPrevi().lines.find(x=>x.id===id);if(!l)return;
+  l.montant=isNaN(n)?0:Math.round(n*100)/100;
+  save();renderContent();
+}
+function togglePreviLineSens(id){
+  const l=getPrevi().lines.find(x=>x.id===id);if(!l)return;
+  l.sens=(l.sens==='in')?'out':'in';
+  save();renderContent();
+}
+function delPreviLine(id){
+  const p=getPrevi();p.lines=p.lines.filter(x=>x.id!==id);
+  save();renderContent();
+}
+function setPreviBase(v){
+  const n=parseFloat((''+v).replace(',','.'));
+  getPrevi().base=isNaN(n)?null:n;
+  save();renderContent();
+}
+function resetPreviBase(){getPrevi().base=null;save();renderContent();}
 function prefillCat(){
   const li=document.getElementById('fLib'),sel=document.getElementById('fCat');if(!li||!sel)return;
   const lib=li.value.trim().toUpperCase();
